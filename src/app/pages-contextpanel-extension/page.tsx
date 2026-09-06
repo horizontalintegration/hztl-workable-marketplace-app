@@ -5,29 +5,39 @@ import type { PagesContext } from '@sitecore-marketplace-sdk/client';
 import { useMarketplaceClient } from '@/src/utils/hooks/useMarketplaceClient';
 
 /**
- * `CareerDetailPage`'s GraphQL type and `careerJobId` field name, mirrored from
- * `hztl-digital-2026`'s `headapps/hztl/src/lib/workable/careerSitecoreSyncClient.ts`
- * (`CAREER_PAGE_GRAPHQL_TYPE`). The inline fragment is also how we detect "this item
- * isn't a Career Detail Page" - it simply won't populate `careerJobId`, no separate
- * template check needed.
+ * Per-deployment, not per-code-change: which Sitecore template (as its GraphQL type) and which
+ * field on it carries the id this app force-syncs by. Defaults match `hztl-digital-2026`'s
+ * `CareerDetailPage`/`careerJobId` (see that repo's `careerSitecoreSyncClient.ts`,
+ * `CAREER_PAGE_GRAPHQL_TYPE`), but a project reusing this app only needs to set these two
+ * `NEXT_PUBLIC_*` vars at build time - no code change - to point it at a different template.
+ * `NEXT_PUBLIC_` is required because this file is a Client Component; Next inlines these at
+ * build time, so changing them means redeploying, not just restarting.
+ */
+const ITEM_GRAPHQL_TYPE = process.env.NEXT_PUBLIC_SITECORE_ITEM_GRAPHQL_TYPE || 'CareerDetailPage';
+const ITEM_ID_FIELD = process.env.NEXT_PUBLIC_SITECORE_ITEM_ID_FIELD || 'careerJobId';
+
+/**
+ * The inline fragment not matching IS the "this item isn't the configured type" check - it
+ * simply won't populate `[ITEM_ID_FIELD]`, so no separate template lookup is needed.
  */
 const ITEM_QUERY = `
-  query GetCareerJobId($itemId: ID!, $language: String!) {
+  query GetForceSyncId($itemId: ID!, $language: String!) {
     item(where: { itemId: $itemId, language: $language }) {
       itemId
       path
-      ... on CareerDetailPage {
-        careerJobId { value }
+      ... on ${ITEM_GRAPHQL_TYPE} {
+        ${ITEM_ID_FIELD} { value }
       }
     }
   }
 `;
 
-interface CareerJobItemQueryResult {
+interface ForceSyncItemQueryResult {
   item?: {
     itemId?: string;
     path?: string;
-    careerJobId?: { value?: string };
+    // The real key is whatever ITEM_ID_FIELD is configured to - not statically known here.
+    [fieldName: string]: unknown;
   };
 }
 
@@ -38,7 +48,7 @@ interface CareerJobItemQueryResult {
  * Returns the query's `data.item`, or `null` if the call failed at either the network or the
  * GraphQL level.
  */
-function extractCareerJobItem(result: unknown): CareerJobItemQueryResult['item'] | null {
+function extractForceSyncItem(result: unknown): ForceSyncItemQueryResult['item'] | null {
   if (!result || typeof result !== 'object') return null;
   const maybeError = (result as { error?: unknown }).error;
   if (maybeError) return null;
@@ -46,7 +56,12 @@ function extractCareerJobItem(result: unknown): CareerJobItemQueryResult['item']
   if (!envelope || (envelope.errors && envelope.errors.length > 0) || !envelope.data) {
     return null;
   }
-  return (envelope.data as CareerJobItemQueryResult).item ?? null;
+  return (envelope.data as ForceSyncItemQueryResult).item ?? null;
+}
+
+function extractSyncId(item: ForceSyncItemQueryResult['item']): string | null {
+  const field = item?.[ITEM_ID_FIELD] as { value?: string } | undefined;
+  return field?.value ?? null;
 }
 
 type SyncState =
@@ -58,7 +73,7 @@ type SyncState =
 function PagesContextPanel() {
   const { client, error: clientError, isInitialized } = useMarketplaceClient();
   const [pagesContext, setPagesContext] = useState<PagesContext>();
-  const [careerJobId, setCareerJobId] = useState<string | null | undefined>(undefined);
+  const [syncId, setSyncId] = useState<string | null | undefined>(undefined);
   const [itemLookupError, setItemLookupError] = useState<string | null>(null);
   const [syncState, setSyncState] = useState<SyncState>({ status: 'idle' });
 
@@ -83,7 +98,7 @@ function PagesContextPanel() {
     }
 
     let cancelled = false;
-    setCareerJobId(undefined);
+    setSyncId(undefined);
     setItemLookupError(null);
 
     client
@@ -92,21 +107,22 @@ function PagesContextPanel() {
       })
       .then((result) => {
         if (cancelled) return;
-        const item = extractCareerJobItem(result);
+        const item = extractForceSyncItem(result);
         if (!item) {
           setItemLookupError('Could not read this item from Sitecore.');
-          setCareerJobId(null);
+          setSyncId(null);
           return;
         }
-        // `undefined` (fragment didn't match) means "not a Career Detail Page" -
-        // normalize to `null` so it's distinguishable from "still loading".
-        setCareerJobId(item.careerJobId?.value ?? null);
+        // `null` here covers both "fragment didn't match" (wrong item type) and "field is
+        // genuinely empty" - normalized so it's distinguishable from "still loading"
+        // (`undefined`).
+        setSyncId(extractSyncId(item));
       })
       .catch((err) => {
         if (cancelled) return;
-        console.error('Error fetching careerJobId:', err);
+        console.error('Error fetching the force-sync id:', err);
         setItemLookupError('Could not read this item from Sitecore.');
-        setCareerJobId(null);
+        setSyncId(null);
       });
 
     return () => {
@@ -115,13 +131,13 @@ function PagesContextPanel() {
   }, [client, itemId, language]);
 
   const handleForceSync = useCallback(async () => {
-    if (!careerJobId) return;
+    if (!syncId) return;
     setSyncState({ status: 'syncing' });
     try {
       const res = await fetch('/api/force-sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ shortcode: careerJobId }),
+        body: JSON.stringify({ shortcode: syncId }),
       });
       const body = await res.json();
       if (!res.ok || !body.ok) {
@@ -138,7 +154,7 @@ function PagesContextPanel() {
       const message = err instanceof Error ? err.message : String(err);
       setSyncState({ status: 'error', message });
     }
-  }, [careerJobId, client]);
+  }, [syncId, client]);
 
   return (
     <div
@@ -152,14 +168,14 @@ function PagesContextPanel() {
     >
       <h3>Workable force sync</h3>
 
-      {!isInitialized || careerJobId === undefined ? (
+      {!isInitialized || syncId === undefined ? (
         <p>Loading page context...</p>
-      ) : careerJobId === null ? (
-        <p>{itemLookupError ?? 'This item is not a Career Detail Page.'}</p>
+      ) : syncId === null ? (
+        <p>{itemLookupError ?? `This item is not a ${ITEM_GRAPHQL_TYPE}.`}</p>
       ) : (
         <>
           <p>
-            Workable job: <strong>{careerJobId}</strong>
+            Workable job: <strong>{syncId}</strong>
           </p>
           <button onClick={handleForceSync} disabled={syncState.status === 'syncing'}>
             {syncState.status === 'syncing' ? 'Syncing...' : 'Force Sync'}
