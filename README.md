@@ -6,46 +6,68 @@ to the one extension point this app needs.
 
 ## 🧩 Extension Points
 
-### Pages Context Panel Extension
+### Page Builder Context Panel Extension
 
 - **Location:** `app/pages-contextpanel-extension/page.tsx`
-- **Description:**  
-  Displays context information about the current page in the XM Cloud Pages editor.
-  - Initializes the Marketplace SDK client.
-  - Subscribes to `pages.context` using the SDK to handle events.
-  - Shows page ID, title, language, and path.
-  - Updates data automatically as the user changes selected page.
-  - **Planned:** read the current item's `careerJobId` field and add a button that force-syncs
-    that Career Detail Page stub from Workable, via `hztl-digital-2026`'s
-    `POST /api/workable/sync` endpoint.
+- **Renders inside:** SitecoreAI Page Builder only, as a left-side panel next to the page
+  canvas - not the classic Content Editor ribbon, and not any other extension point surface.
+- **Description:**
+  - Subscribes to `pages.context` to get the open item's id/language.
+  - Looks up that item via Authoring GraphQL (`xmc.authoring.graphql`), matching it against
+    the `CareerDetailPage` type - an item that isn't one simply doesn't populate `careerJobId`,
+    which the panel treats as "not a Career Detail Page" and shows no button.
+  - If the item is a Career Detail Page, shows its Workable job shortcode and a **Force Sync**
+    button.
+  - The button calls this app's own `POST /api/force-sync`, which is the only place in this
+    app holding `WORKABLE_FORCE_UPDATE_SECRET`, and proxies to `hztl-digital-2026`'s existing
+    `POST /api/workable/sync?shortcode=...`.
+  - On success, calls `pages.reloadCanvas` so the editor sees the refreshed content without a
+    manual reload.
 
 The starter's other four extension points (Custom Field, Dashboard Widget, Fullscreen,
-Standalone) were removed - this app only needs a Pages Context Panel.
+Standalone) were removed - this app only needs the Page Builder Context Panel.
 
-# 📦 Getting Started
+## 🚀 Getting Started (local dev)
 
-Note: You cannot access extension point routes directly in the browser (e.g., localhost:3000/...). These routes must be invoked within the Sitecore XM Cloud environment through the configured extension points.To learn how to properly configure and hook up your app to extension points, refer to the official [Sitecore Marketplace documentation](https://doc.sitecore.com/mp/en/developers/marketplace/extension-points.html)
+Note: extension point routes only render inside Sitecore's own UI, not by visiting
+`localhost:3000/pages-contextpanel-extension` directly in a browser - the SDK client's
+handshake needs a real Sitecore Pages iframe host.
 
+1. `npm install`
+2. Copy `.env.example` to `.env.local` and fill in both values (see **Configuration** below)
+3. `npm run dev`
+4. Register/configure the app in the Cloud Portal (see **Deployment**) pointing its Deployment
+   URL at this dev server, then open Sitecore Pages on a Career Detail Page item to see the
+   panel render for real
 
-1. Create Your Own Repository:
-   - You can either fork this repository or create a new template based on it.
-   - This gives you a clean starting point with all the necessary scaffolding for Marketplace extension development.
+## ⚙️ Configuration
 
-2. Remove the endpoints you dont require
-   - Remove any extension points you don't plan to support by deleting their respective folders inside the app directory.
-   - Each folder in app corresponds to a specific extension point (e.g., custom-field-extension, dashboard-widget-extension, etc.).
+Two environment variables, both read only by the server-side `/api/force-sync` route - never
+by the client panel:
 
-3. Install dependencies:
-   ```sh
-   npm install
-   ```
+| Variable | Where it comes from | Notes |
+|---|---|---|
+| `WORKABLE_FORCE_UPDATE_SECRET` | Generate once (e.g. `openssl rand -hex 32`) | Must be the **exact same value** configured as `WORKABLE_FORCE_UPDATE_SECRET` on the `hztl-digital-2026` deployment - it's a shared secret between the two apps, not something this app owns independently |
+| `HZTL_SYNC_ENDPOINT_URL` | The `hztl-digital-2026` deployment's own public URL | Absolute URL, no trailing slash, e.g. `https://hztl-digital.vercel.app` |
 
-4. Run the development server:
-   ```sh
-   npm run dev
-   ```
+Local dev: put both in `.env.local` (already gitignored - never commit it).
 
-5. Install the application and test in the different extension points by following the [Sitecore documentation](https://doc.sitecore.com/mp/en/developers/marketplace/introduction-to-sitecore-marketplace.html)
+## 📤 Deployment
+
+1. Deploy this app to hosting with a public HTTPS URL (Vercel, matching how
+   `hztl-digital-2026` is hosted, is the natural default - zero-config for a plain Next.js app,
+   no `vercel.json` needed since this app has no cron jobs).
+2. In that hosting project's environment variables, add `WORKABLE_FORCE_UPDATE_SECRET` and
+   `HZTL_SYNC_ENDPOINT_URL` from the table above. Mark the secret as sensitive/encrypted if the
+   platform offers that (Vercel: Project → Settings → Environment Variables → toggle
+   "Sensitive").
+3. Register the app in the Sitecore Cloud Portal (App Studio → Studio → Create app → Custom),
+   configure the **Page Builder Context Panel** extension point with Route URL
+   `/pages-contextpanel-extension`, and set its Deployment URL to this app's real hosted URL.
+   See [Register a custom app](https://doc.sitecore.com/mp/en/developers/marketplace/register-a-custom-app.html)
+   and [Configure and activate a custom app](https://doc.sitecore.com/mp/en/developers/marketplace/configure-and-activate-a-custom-app.html).
+4. Activate the app for the target environment, then verify on a real Career Detail Page item
+   in Sitecore Pages.
 
 ## 📝 License
 
