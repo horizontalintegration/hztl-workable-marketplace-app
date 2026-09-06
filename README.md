@@ -1,40 +1,12 @@
-# 🏪 Sitecore Marketplace Starter
+# 🏪 HZTL Workable Marketplace App
 
-This project is the starter template for building Sitecore Marketplace extensions. It demonstrates five extension points: **Custom Field**, **Dashboard Widget**, **Fullscreen**, **Pages Context Panel**, and **Standalone**. Each extension point has its own UI and integration with the Sitecore Marketplace SDK.
+Sitecore Marketplace app for the HZTL Digital Workable integration. Scaffolded from
+[`Sitecore/marketplace-starter`](https://github.com/Sitecore/marketplace-starter), pruned down
+to the one extension point this app needs.
 
 ## 🧩 Extension Points
 
-### 1. Custom Field Extension
-
-- **Location:** `app/custom-field-extension/page.tsx`
-- **Description:**  
-  Provides a button-based UI for selecting preset options to showcase how to update field values.
-  - Initializes the Marketplace SDK client.
-  - On button click,, updates the field value using client.setValue(selected) and closes the app after a short delay.
-
----
-
-### 2. Dashboard Widget Extension
-
-- **Location:** `app/dashboard-widget-extension/page.tsx`
-- **Description:**  
-  Displays a widget in the XM Cloud dashboard.
-  - Initializes the Marketplace SDK client.
-  - Displays sample dashboard information.
-
----
-
-### 3. Fullscreen Extension
-
-- **Location:** `app/fullscreen-extension/page.tsx`
-- **Description:**  
-  Provides a fullscreen experience to be rendered in the Pages application.
-  - Initializes the Marketplace SDK client.
-  - Displays sample dashboard information.
-
----
-
-### 4. Pages Context Panel Extension
+### Pages Context Panel Extension
 
 - **Location:** `app/pages-contextpanel-extension/page.tsx`
 - **Description:**  
@@ -43,16 +15,12 @@ This project is the starter template for building Sitecore Marketplace extension
   - Subscribes to `pages.context` using the SDK to handle events.
   - Shows page ID, title, language, and path.
   - Updates data automatically as the user changes selected page.
+  - **Planned:** read the current item's `careerJobId` field and add a button that force-syncs
+    that Career Detail Page stub from Workable, via `hztl-digital-2026`'s
+    `POST /api/workable/sync` endpoint.
 
----
-
-### 5. Standalone Extension
-
-- **Location:** `app/standalone-extension/page.tsx`
-- **Description:**  
-  Runs as a standalone app outside of other extension points.
-  - Initializes the Marketplace SDK client.
-  - Displays sample dashboard information.
+The starter's other four extension points (Custom Field, Dashboard Widget, Fullscreen,
+Standalone) were removed - this app only needs a Pages Context Panel.
 
 # 📦 Getting Started
 
