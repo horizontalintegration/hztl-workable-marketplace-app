@@ -162,7 +162,7 @@ function PagesContextPanel() {
             Workable job: <strong>{careerJobId}</strong>
           </p>
           <button onClick={handleForceSync} disabled={syncState.status === 'syncing'}>
-            {syncState.status === 'syncing' ? 'Syncing...' : 'Force sync from Workable'}
+            {syncState.status === 'syncing' ? 'Syncing...' : 'Force Sync'}
           </button>
           {syncState.status === 'success' && <p>Synced ({syncState.operation}).</p>}
           {syncState.status === 'error' && <p role="alert">Sync failed: {syncState.message}</p>}
