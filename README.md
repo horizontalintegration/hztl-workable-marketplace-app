@@ -24,7 +24,9 @@ to the one extension point this app needs.
   - If the item matches, shows its Workable id and a **Force Sync** button.
   - The button calls this app's own `POST /api/force-sync`, which is the only place in this app
     holding `WORKABLE_FORCE_UPDATE_SECRET`, and proxies to whatever endpoint
-    `WORKABLE_SYNC_ENDPOINT_URL` names.
+    `WORKABLE_SYNC_ENDPOINT_URL` names. Rate-limited to 5 requests/minute per client IP
+    (best-effort, per serverless instance) since this route has no inbound auth of its own -
+    see the route's header comment for the accepted threat model.
   - On success, calls `pages.reloadCanvas` so the editor sees the refreshed content without a
     manual reload.
 
@@ -44,6 +46,9 @@ handshake needs a real Sitecore Pages iframe host.
 4. Register/configure the app in the Cloud Portal (see **Deployment**) pointing its Deployment
    URL at this dev server, then open Sitecore Pages on a matching content item to see the panel
    render for real
+
+Other scripts: `npm run lint` (ESLint), `npm run test` (Vitest, covers `/api/force-sync`'s
+error paths and rate limiting).
 
 ## ⚙️ Configuration
 

@@ -1,8 +1,8 @@
 import type { Metadata } from 'next'
 
 export const metadata: Metadata = {
-  title: 'Sitecore Marketplace Extensions',
-  description: 'Sitecore Marketplace extension starter application',
+  title: 'Workable Marketplace App',
+  description: 'Sitecore Marketplace app for force-syncing Workable-backed content items',
 }
 
 export default function RootLayout({
