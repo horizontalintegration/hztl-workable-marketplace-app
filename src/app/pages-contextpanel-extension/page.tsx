@@ -70,23 +70,36 @@ type SyncState =
   | { status: 'success'; operation: string }
   | { status: 'error'; message: string };
 
+interface SyncLookupResult {
+  key: string;
+  syncId: string | null;
+  error: string | null;
+}
+
 function PagesContextPanel() {
   const { client, error: clientError, isInitialized } = useMarketplaceClient();
   const [pagesContext, setPagesContext] = useState<PagesContext>();
-  const [syncId, setSyncId] = useState<string | null | undefined>(undefined);
-  const [itemLookupError, setItemLookupError] = useState<string | null>(null);
+  const [syncLookup, setSyncLookup] = useState<SyncLookupResult | null>(null);
   const [syncState, setSyncState] = useState<SyncState>({ status: 'idle' });
 
   useEffect(() => {
     if (clientError || !isInitialized || !client) {
       return;
     }
+    let unsubscribe: (() => void) | undefined;
     client
       .query('pages.context', {
         subscribe: true,
         onSuccess: (res) => setPagesContext(res),
       })
+      .then((result) => {
+        unsubscribe = result?.unsubscribe;
+      })
       .catch((err) => console.error('Error retrieving pages.context:', err));
+
+    return () => {
+      unsubscribe?.();
+    };
   }, [client, clientError, isInitialized]);
 
   const itemId = pagesContext?.pageInfo?.id;
@@ -97,9 +110,8 @@ function PagesContextPanel() {
       return;
     }
 
+    const key = `${itemId}::${language}`;
     let cancelled = false;
-    setSyncId(undefined);
-    setItemLookupError(null);
 
     client
       .mutate('xmc.authoring.graphql', {
@@ -109,26 +121,33 @@ function PagesContextPanel() {
         if (cancelled) return;
         const item = extractForceSyncItem(result);
         if (!item) {
-          setItemLookupError('Could not read this item from Sitecore.');
-          setSyncId(null);
+          setSyncLookup({ key, syncId: null, error: 'Could not read this item from Sitecore.' });
           return;
         }
         // `null` here covers both "fragment didn't match" (wrong item type) and "field is
-        // genuinely empty" - normalized so it's distinguishable from "still loading"
-        // (`undefined`).
-        setSyncId(extractSyncId(item));
+        // genuinely empty" - normalized so it's distinguishable from "still loading" (no
+        // result yet for this key).
+        setSyncLookup({ key, syncId: extractSyncId(item), error: null });
       })
       .catch((err) => {
         if (cancelled) return;
         console.error('Error fetching the force-sync id:', err);
-        setItemLookupError('Could not read this item from Sitecore.');
-        setSyncId(null);
+        setSyncLookup({ key, syncId: null, error: 'Could not read this item from Sitecore.' });
       });
 
     return () => {
       cancelled = true;
     };
   }, [client, itemId, language]);
+
+  // The lookup result is only "current" once it was recorded for this exact itemId/language -
+  // otherwise it's stale (from a previous item) or absent (still loading), so `syncId` reads as
+  // `undefined` in both of those cases, same as before this used a ref-free derived value
+  // instead of resetting state at the top of the effect above.
+  const currentKey = itemId && language ? `${itemId}::${language}` : null;
+  const isCurrent = syncLookup?.key === currentKey;
+  const syncId = isCurrent ? syncLookup.syncId : undefined;
+  const itemLookupError = isCurrent ? syncLookup.error : null;
 
   const handleForceSync = useCallback(async () => {
     if (!syncId) return;

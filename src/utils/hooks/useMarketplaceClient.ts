@@ -69,44 +69,49 @@ export function useMarketplaceClient(options: UseMarketplaceClientOptions = {}) 
   // Use ref to track if we're currently initializing to prevent race conditions
   const isInitializingRef = useRef(false);
 
-  const initializeClient = useCallback(async (attempt = 1): Promise<void> => {
-    // Use functional state update to check current state without dependencies
-    let shouldProceed = false;
-    setState(prev => {
-      if (prev.isLoading || prev.isInitialized || isInitializingRef.current) {
-        return prev;
-      }
-      shouldProceed = true;
-      isInitializingRef.current = true;
-      return { ...prev, isLoading: true, error: null };
-    });
-
-    if (!shouldProceed) return;
-
-    try {
-      const client = await getMarketplaceClient();
-      setState({
-        client,
-        error: null,
-        isLoading: false,
-        isInitialized: true,
+  const initializeClient = useCallback(
+    // Named (not just assigned to a const) so the retry recursion below calls the function via
+    // its own immutable binding, not the outer `initializeClient` binding.
+    async function attemptInit(attempt = 1): Promise<void> {
+      // Use functional state update to check current state without dependencies
+      let shouldProceed = false;
+      setState(prev => {
+        if (prev.isLoading || prev.isInitialized || isInitializingRef.current) {
+          return prev;
+        }
+        shouldProceed = true;
+        isInitializingRef.current = true;
+        return { ...prev, isLoading: true, error: null };
       });
-    } catch (error) {
-      if (attempt < opts.retryAttempts) {
-        await new Promise(resolve => setTimeout(resolve, opts.retryDelay));
-        return initializeClient(attempt + 1);
-      }
 
-      setState({
-        client: null,
-        error: error instanceof Error ? error : new Error('Failed to initialize MarketplaceClient'),
-        isLoading: false,
-        isInitialized: false,
-      });
-    } finally {
-      isInitializingRef.current = false;
-    }
-  }, [opts.retryAttempts, opts.retryDelay]); // Removed state dependencies
+      if (!shouldProceed) return;
+
+      try {
+        const client = await getMarketplaceClient();
+        setState({
+          client,
+          error: null,
+          isLoading: false,
+          isInitialized: true,
+        });
+      } catch (error) {
+        if (attempt < opts.retryAttempts) {
+          await new Promise(resolve => setTimeout(resolve, opts.retryDelay));
+          return attemptInit(attempt + 1);
+        }
+
+        setState({
+          client: null,
+          error: error instanceof Error ? error : new Error('Failed to initialize MarketplaceClient'),
+          isLoading: false,
+          isInitialized: false,
+        });
+      } finally {
+        isInitializingRef.current = false;
+      }
+    },
+    [opts.retryAttempts, opts.retryDelay] // Removed state dependencies
+  );
 
   useEffect(() => {
     if (opts.autoInit) {

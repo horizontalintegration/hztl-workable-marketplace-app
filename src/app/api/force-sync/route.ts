@@ -13,11 +13,52 @@
  *   - `POST <WORKABLE_SYNC_ENDPOINT_URL>?shortcode=<id>`
  *   - Header `x-workable-sync-secret: <WORKABLE_FORCE_UPDATE_SECRET>` (same value on both apps)
  *   - JSON response `{ ok: boolean, operation?: string, error?: string }`
+ *
+ * Known, accepted limitation: `WORKABLE_FORCE_UPDATE_SECRET` authenticates this app's OUTBOUND
+ * call to the downstream endpoint, but nothing authenticates who calls THIS route inbound -
+ * anyone who discovers this app's deployed URL can POST here directly (no browser needed, so
+ * CORS doesn't help). The rate limit below bounds that gap rather than closing it: the
+ * operation it gates is already bounded (one legitimate resync, not an arbitrary Sitecore
+ * write), so capping abuse volume is a proportionate mitigation for now, not real per-caller
+ * auth. Revisit if this app's threat model changes.
  */
 import type { NextRequest } from 'next/server';
 
 interface ForceSyncRequestBody {
   shortcode?: unknown;
+}
+
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 5;
+
+interface RateLimitEntry {
+  count: number;
+  windowStart: number;
+}
+
+/**
+ * Module-level, so best-effort only: a serverless deployment may run several concurrent
+ * instances, each with its own Map, so this caps abuse per instance, not truly globally across
+ * a deployment. Acceptable given the bounded blast radius documented above - an exact,
+ * cross-instance limit would need shared state (e.g. Vercel KV/Redis), disproportionate
+ * infrastructure for an internal tool at this traffic level.
+ */
+const rateLimitState = new Map<string, RateLimitEntry>();
+
+function isRateLimited(key: string): boolean {
+  const now = Date.now();
+  const entry = rateLimitState.get(key);
+  if (!entry || now - entry.windowStart >= RATE_LIMIT_WINDOW_MS) {
+    rateLimitState.set(key, { count: 1, windowStart: now });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > RATE_LIMIT_MAX_REQUESTS;
+}
+
+/** First hop in `x-forwarded-for` is the original client on Vercel's proxy chain. */
+function getClientKey(req: NextRequest): string {
+  return req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
@@ -29,6 +70,15 @@ export async function POST(req: NextRequest): Promise<Response> {
       '[force-sync] WORKABLE_FORCE_UPDATE_SECRET/WORKABLE_SYNC_ENDPOINT_URL not configured'
     );
     return Response.json({ ok: false, error: 'Force sync is not configured' }, { status: 500 });
+  }
+
+  const clientKey = getClientKey(req);
+  if (isRateLimited(clientKey)) {
+    console.warn('[force-sync] Rate limit exceeded', { clientKey });
+    return Response.json(
+      { ok: false, error: 'Too many requests - try again shortly.' },
+      { status: 429, headers: { 'Retry-After': String(RATE_LIMIT_WINDOW_MS / 1000) } }
+    );
   }
 
   let requestBody: ForceSyncRequestBody;
