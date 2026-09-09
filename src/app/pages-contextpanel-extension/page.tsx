@@ -42,6 +42,22 @@ interface ForceSyncItemQueryResult {
 }
 
 /**
+ * Every xmc.authoring.graphql call must be scoped with the app's Sitecore Context ID, or the
+ * host's edge GraphQL endpoint has nothing to route the request to and 404s (see
+ * doc.sitecore.com/mp/.../make-a-graphql-query.html) - it comes from `application.context`, not
+ * `pages.context`, so it's fetched once via a separate query.
+ */
+interface ApplicationContextResult {
+  resourceAccess?: Array<{ context?: { live?: string } }>;
+}
+
+function extractSitecoreContextId(result: unknown): string | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const data = (result as { data?: ApplicationContextResult }).data;
+  return data?.resourceAccess?.[0]?.context?.live;
+}
+
+/**
  * `client.mutate('xmc.authoring.graphql', ...)`'s resolved type is a conditional type from
  * `@hey-api/client-fetch` (varies by `ThrowOnError`) that TypeScript widens into an awkward
  * union - safer to narrow it at runtime through `unknown` than to fight that union with casts.
@@ -79,6 +95,7 @@ interface SyncLookupResult {
 function PagesContextPanel() {
   const { client, error: clientError, isInitialized } = useMarketplaceClient();
   const [pagesContext, setPagesContext] = useState<PagesContext>();
+  const [sitecoreContextId, setSitecoreContextId] = useState<string>();
   const [syncLookup, setSyncLookup] = useState<SyncLookupResult | null>(null);
   const [syncState, setSyncState] = useState<SyncState>({ status: 'idle' });
 
@@ -102,11 +119,21 @@ function PagesContextPanel() {
     };
   }, [client, clientError, isInitialized]);
 
+  useEffect(() => {
+    if (clientError || !isInitialized || !client) {
+      return;
+    }
+    client
+      .query('application.context')
+      .then((result) => setSitecoreContextId(extractSitecoreContextId(result)))
+      .catch((err) => console.error('Error retrieving application.context:', err));
+  }, [client, clientError, isInitialized]);
+
   const itemId = pagesContext?.pageInfo?.id;
   const language = pagesContext?.pageInfo?.language;
 
   useEffect(() => {
-    if (!client || !itemId || !language) {
+    if (!client || !itemId || !language || !sitecoreContextId) {
       return;
     }
 
@@ -115,7 +142,10 @@ function PagesContextPanel() {
 
     client
       .mutate('xmc.authoring.graphql', {
-        params: { body: { query: ITEM_QUERY, variables: { itemId, language } } },
+        params: {
+          query: { sitecoreContextId },
+          body: { query: ITEM_QUERY, variables: { itemId, language } },
+        },
       })
       .then((result) => {
         if (cancelled) return;
@@ -138,7 +168,7 @@ function PagesContextPanel() {
     return () => {
       cancelled = true;
     };
-  }, [client, itemId, language]);
+  }, [client, itemId, language, sitecoreContextId]);
 
   // The lookup result is only "current" once it was recorded for this exact itemId/language -
   // otherwise it's stale (from a previous item) or absent (still loading), so `syncId` reads as
