@@ -117,6 +117,28 @@ that project's own Vercel Cron already calls on a schedule.
 4. Activate the app for the target environment, then verify on a real matching content item in
    Sitecore Pages.
 
+### Client Credentials - not needed
+
+App Studio offers a **Client Credentials** section (dedicated OAuth credentials for an app to
+call Sitecore APIs server-side, with no live user session - for background jobs, webhooks, or
+scheduled tasks). Leave it unset for this app, in every environment (dev/qa/prod alike) -
+neither of this app's two code paths needs it:
+
+- The **Page Context Panel** itself runs client-side and calls `xmc.authoring.graphql` through
+  the Marketplace SDK, riding on the **editor's own live Sitecore Pages session**
+  (`sitecoreContextId`/`application.context`) - not a separate app identity.
+- **`/api/force-sync` and `/api/bulk-import`** never call Sitecore APIs directly at all - they
+  proxy to the downstream project's own endpoints using the shared secrets in
+  **Configuration** above. The actual Sitecore-side write authentication already lives on that
+  project's side (e.g. `hztl-digital-2026`'s Workable import has its own dedicated Sitecore
+  OAuth client - see that repo's `imports/workable-sitecore-full-import/README.md`
+  Prerequisites), not in this app.
+
+Client Credentials would only become relevant if this app's architecture changed - e.g. if
+`/api/bulk-import` called Sitecore's Authoring GraphQL directly instead of proxying to the
+downstream project. That's not the current design, and doing so would duplicate auth logic
+that already exists correctly on the other side.
+
 ## ♻️ Reusing this app for another project
 
 This app is a per-project deployment, not a single multi-tenant instance - each project that
