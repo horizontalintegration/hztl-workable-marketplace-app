@@ -17,16 +17,48 @@ const ITEM_GRAPHQL_TYPE = process.env.NEXT_PUBLIC_SITECORE_ITEM_GRAPHQL_TYPE || 
 const ITEM_ID_FIELD = process.env.NEXT_PUBLIC_SITECORE_ITEM_ID_FIELD || 'careerJobId';
 
 /**
- * The inline fragment not matching IS the "this item isn't the configured type" check - it
- * simply won't populate `[ITEM_ID_FIELD]`, so no separate template lookup is needed.
+ * Path to the Site Settings item, and the Droplink/Droptree field on it, that name the "Careers
+ * root" page - the one page the Bulk Import button shows on. Defaults match
+ * `hztl-digital-2026`'s `SITE_SETTINGS_ITEM_PATH`/`careersRootPage` (see that repo's
+ * `careerSitecoreSyncClient.ts`). Same reuse/override story as `ITEM_GRAPHQL_TYPE` above.
+ */
+const CAREERS_ROOT_SETTINGS_PATH =
+  process.env.NEXT_PUBLIC_SITECORE_CAREERS_ROOT_SETTINGS_PATH ||
+  '/sitecore/content/HztlFoundation/HztlDigital/Settings/Site Settings';
+const CAREERS_ROOT_FIELD = process.env.NEXT_PUBLIC_SITECORE_CAREERS_ROOT_FIELD || 'careersRootPage';
+
+/**
+ * Uses Sitecore's generic `field(name:)` accessor rather than a typed inline fragment, so
+ * this doesn't depend on `ITEM_GRAPHQL_TYPE` being registered as a distinct object type in
+ * the Authoring GraphQL schema - only on the field existing on the item. Same pattern this
+ * project's Workable import already relies on (see `careerSitecoreSyncClient.ts`'s
+ * `field(name: "careerJobId")`). An item whose template lacks this field still returns
+ * `null` for it, which remains the "this item isn't the configured type" signal - no
+ * separate template lookup is needed.
  */
 const ITEM_QUERY = `
   query GetForceSyncId($itemId: ID!, $language: String!) {
     item(where: { itemId: $itemId, language: $language }) {
       itemId
       path
-      ... on ${ITEM_GRAPHQL_TYPE} {
-        ${ITEM_ID_FIELD} { value }
+      ${ITEM_ID_FIELD}: field(name: "${ITEM_ID_FIELD}") {
+        value
+      }
+    }
+  }
+`;
+
+/**
+ * Same generic-field reasoning as `ITEM_QUERY` above - a Droplink field's raw value is the
+ * target item's id. Uses the `where:` wrapper, not a bare `path` argument - Authoring's
+ * `item` root field takes `where: { path, language }`, unlike Edge's `item(path:, language:)`
+ * shape (see `careerSitecoreSyncClient.ts`'s `resolveCareersRootPath`, which targets Edge).
+ */
+const CAREERS_ROOT_QUERY = `
+  query GetCareersRootId($path: String!, $language: String!) {
+    item(where: { path: $path, language: $language }) {
+      ${CAREERS_ROOT_FIELD}: field(name: "${CAREERS_ROOT_FIELD}") {
+        value
       }
     }
   }
@@ -62,9 +94,9 @@ function extractSitecoreContextId(result: unknown): string | undefined {
  * `@hey-api/client-fetch` (varies by `ThrowOnError`) that TypeScript widens into an awkward
  * union - safer to narrow it at runtime through `unknown` than to fight that union with casts.
  * Returns the query's `data.item`, or `null` if the call failed at either the network or the
- * GraphQL level.
+ * GraphQL level. Shared by both `xmc.authoring.graphql` queries this panel makes.
  */
-function extractForceSyncItem(result: unknown): ForceSyncItemQueryResult['item'] | null {
+function unwrapGraphQLItem(result: unknown): Record<string, unknown> | null {
   if (!result || typeof result !== 'object') return null;
   const maybeError = (result as { error?: unknown }).error;
   if (maybeError) return null;
@@ -72,12 +104,23 @@ function extractForceSyncItem(result: unknown): ForceSyncItemQueryResult['item']
   if (!envelope || (envelope.errors && envelope.errors.length > 0) || !envelope.data) {
     return null;
   }
-  return (envelope.data as ForceSyncItemQueryResult).item ?? null;
+  const item = (envelope.data as { item?: unknown }).item;
+  return (item as Record<string, unknown>) ?? null;
 }
 
-function extractSyncId(item: ForceSyncItemQueryResult['item']): string | null {
+function extractSyncId(item: Record<string, unknown> | null): string | null {
   const field = item?.[ITEM_ID_FIELD] as { value?: string } | undefined;
   return field?.value ?? null;
+}
+
+function extractCareersRootId(item: Record<string, unknown> | null): string | null {
+  const field = item?.[CAREERS_ROOT_FIELD] as { value?: string } | undefined;
+  return field?.value || null;
+}
+
+/** Sitecore item ids compare equal regardless of brace/casing - normalize before comparing. */
+function normalizeItemId(id: string): string {
+  return id.replace(/[{}]/g, '').toLowerCase();
 }
 
 type SyncState =
@@ -92,12 +135,31 @@ interface SyncLookupResult {
   error: string | null;
 }
 
+interface BulkImportSummary {
+  publishedJobCount?: number;
+  created?: number;
+  updated?: number;
+  skipped?: number;
+  failed?: number;
+}
+
+type BulkImportState =
+  | { status: 'idle' }
+  | { status: 'syncing' }
+  | { status: 'success'; summary: BulkImportSummary }
+  | { status: 'error'; message: string };
+
 function PagesContextPanel() {
   const { client, error: clientError, isInitialized } = useMarketplaceClient();
   const [pagesContext, setPagesContext] = useState<PagesContext>();
   const [sitecoreContextId, setSitecoreContextId] = useState<string>();
   const [syncLookup, setSyncLookup] = useState<SyncLookupResult | null>(null);
   const [syncState, setSyncState] = useState<SyncState>({ status: 'idle' });
+  // `undefined` = not looked up yet, `null` = looked up and there isn't one (unset field or the
+  // lookup failed) - see the loading-gate comment below for why a failure must still resolve
+  // out of `undefined` rather than leaving the whole panel stuck on "Loading...".
+  const [careersRootItemId, setCareersRootItemId] = useState<string | null>();
+  const [bulkImportState, setBulkImportState] = useState<BulkImportState>({ status: 'idle' });
 
   useEffect(() => {
     if (clientError || !isInitialized || !client) {
@@ -149,7 +211,7 @@ function PagesContextPanel() {
       })
       .then((result) => {
         if (cancelled) return;
-        const item = extractForceSyncItem(result);
+        const item = unwrapGraphQLItem(result);
         if (!item) {
           setSyncLookup({ key, syncId: null, error: 'Could not read this item from Sitecore.' });
           return;
@@ -170,6 +232,37 @@ function PagesContextPanel() {
     };
   }, [client, itemId, language, sitecoreContextId]);
 
+  useEffect(() => {
+    if (!client || !sitecoreContextId) {
+      return;
+    }
+    let cancelled = false;
+
+    client
+      .mutate('xmc.authoring.graphql', {
+        params: {
+          query: { sitecoreContextId },
+          body: {
+            query: CAREERS_ROOT_QUERY,
+            variables: { path: CAREERS_ROOT_SETTINGS_PATH, language: language ?? 'en' },
+          },
+        },
+      })
+      .then((result) => {
+        if (cancelled) return;
+        setCareersRootItemId(extractCareersRootId(unwrapGraphQLItem(result)));
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error('Error resolving the careers root item id:', err);
+        setCareersRootItemId(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client, sitecoreContextId, language]);
+
   // The lookup result is only "current" once it was recorded for this exact itemId/language -
   // otherwise it's stale (from a previous item) or absent (still loading), so `syncId` reads as
   // `undefined` in both of those cases, same as before this used a ref-free derived value
@@ -178,6 +271,9 @@ function PagesContextPanel() {
   const isCurrent = syncLookup?.key === currentKey;
   const syncId = isCurrent ? syncLookup.syncId : undefined;
   const itemLookupError = isCurrent ? syncLookup.error : null;
+
+  const isCareersRoot =
+    !!itemId && !!careersRootItemId && normalizeItemId(itemId) === normalizeItemId(careersRootItemId);
 
   const handleForceSync = useCallback(async () => {
     if (!syncId) return;
@@ -205,6 +301,34 @@ function PagesContextPanel() {
     }
   }, [syncId, client]);
 
+  const handleBulkImport = useCallback(async () => {
+    setBulkImportState({ status: 'syncing' });
+    try {
+      const res = await fetch('/api/bulk-import', { method: 'POST' });
+      const body = await res.json();
+      if (!res.ok || !body.ok) {
+        setBulkImportState({ status: 'error', message: body.error ?? `Request failed (${res.status})` });
+        return;
+      }
+      setBulkImportState({
+        status: 'success',
+        summary: {
+          publishedJobCount: body.publishedJobCount,
+          created: body.created,
+          updated: body.updated,
+          skipped: body.skipped,
+          failed: body.failed,
+        },
+      });
+      client?.mutate('pages.reloadCanvas').catch((err) => {
+        console.error('pages.reloadCanvas failed after a successful bulk import:', err);
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setBulkImportState({ status: 'error', message });
+    }
+  }, [client]);
+
   return (
     <div
       style={{
@@ -217,7 +341,26 @@ function PagesContextPanel() {
     >
       <h3>Workable force sync</h3>
 
-      {!isInitialized || syncId === undefined ? (
+      {!isInitialized || itemId === undefined || careersRootItemId === undefined ? (
+        <p>Loading page context...</p>
+      ) : isCareersRoot ? (
+        <>
+          <p>Bulk import every published Workable job into Sitecore.</p>
+          <button onClick={handleBulkImport} disabled={bulkImportState.status === 'syncing'}>
+            {bulkImportState.status === 'syncing' ? 'Importing...' : 'Bulk Import'}
+          </button>
+          {bulkImportState.status === 'success' && (
+            <p>
+              Done - {bulkImportState.summary.created ?? 0} created, {bulkImportState.summary.updated ?? 0}{' '}
+              updated, {bulkImportState.summary.skipped ?? 0} skipped
+              {bulkImportState.summary.failed ? `, ${bulkImportState.summary.failed} failed` : ''}.
+            </p>
+          )}
+          {bulkImportState.status === 'error' && (
+            <p role="alert">Bulk import failed: {bulkImportState.message}</p>
+          )}
+        </>
+      ) : syncId === undefined ? (
         <p>Loading page context...</p>
       ) : syncId === null ? (
         <p>{itemLookupError ?? `This item is not a ${ITEM_GRAPHQL_TYPE}.`}</p>
@@ -229,7 +372,9 @@ function PagesContextPanel() {
           <button onClick={handleForceSync} disabled={syncState.status === 'syncing'}>
             {syncState.status === 'syncing' ? 'Syncing...' : 'Force Sync'}
           </button>
-          {syncState.status === 'success' && <p>Synced ({syncState.operation}).</p>}
+          {syncState.status === 'success' && (
+            <p>{syncState.operation === 'skipped' ? 'No update needed.' : `Synced (${syncState.operation}).`}</p>
+          )}
           {syncState.status === 'error' && <p role="alert">Sync failed: {syncState.message}</p>}
         </>
       )}
