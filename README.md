@@ -27,6 +27,13 @@ to the one extension point this app needs.
     `WORKABLE_SYNC_ENDPOINT_URL` names. Rate-limited to 5 requests/minute per client IP
     (best-effort, per serverless instance) since this route has no inbound auth of its own -
     see the route's header comment for the accepted threat model.
+  - On the **Careers root page** specifically (resolved from the Site Settings item's
+    `NEXT_PUBLIC_SITECORE_CAREERS_ROOT_FIELD` Droplink, default `careersRootPage`), shows a
+    **Bulk Import** button instead - triggers the project's full scheduled Workable sync
+    on demand, via `POST /api/bulk-import` (the only place holding
+    `CRON_SECRET`), proxying to `WORKABLE_BULK_IMPORT_ENDPOINT_URL`.
+    Rate-limited to 2 requests/5 minutes per client IP - this triggers a heavy, account-wide
+    operation, not a single item.
   - On success, calls `pages.reloadCanvas` so the editor sees the refreshed content without a
     manual reload.
 
@@ -47,24 +54,29 @@ handshake needs a real Sitecore Pages iframe host.
    URL at this dev server, then open Sitecore Pages on a matching content item to see the panel
    render for real
 
-Other scripts: `npm run lint` (ESLint), `npm run test` (Vitest, covers `/api/force-sync`'s
-error paths and rate limiting).
+Other scripts: `npm run lint` (ESLint), `npm run test` (Vitest, covers `/api/force-sync`'s and
+`/api/bulk-import`'s error paths and rate limiting).
 
 ## ⚙️ Configuration
 
-All four variables are read only by the server side (`/api/force-sync`) or inlined at build
-time for the client panel - never both, and the client panel never sees the secret.
+Secrets and endpoint URLs are read only by their respective server routes; `NEXT_PUBLIC_*`
+values are inlined at build time for the client panel - never both, and the client panel never
+sees either secret.
 
 | Variable | Required? | Notes |
 |---|---|---|
 | `WORKABLE_FORCE_UPDATE_SECRET` | Always | Generate once (e.g. `openssl rand -hex 32`). Must be the **exact same value** the downstream sync endpoint checks - it's a shared secret between two apps, not something this app owns independently |
 | `WORKABLE_SYNC_ENDPOINT_URL` | Always | The downstream project's force-sync endpoint - the **full URL, path included** (e.g. `https://hztl-digital.vercel.app/api/workable/sync`), not just a hostname. See the downstream contract below |
+| `CRON_SECRET` | Always | Must be the **exact same value** as the downstream project's own `CRON_SECRET` - this reuses that secret rather than minting a dedicated one, since the downstream route doesn't distinguish its own scheduler from any other caller presenting the right bearer token |
+| `WORKABLE_BULK_IMPORT_ENDPOINT_URL` | Always | The downstream project's scheduled bulk-import endpoint - full URL, path included (e.g. `https://hztl-digital.vercel.app/api/workable/import`) |
 | `NEXT_PUBLIC_SITECORE_ITEM_GRAPHQL_TYPE` | Only if your content model differs | GraphQL type name of the template this app should recognize. Default: `CareerDetailPage`. Client-side (`NEXT_PUBLIC_`) - changing it means redeploying, not just restarting |
 | `NEXT_PUBLIC_SITECORE_ITEM_ID_FIELD` | Only if your content model differs | Field on that template holding the id to sync by. Default: `careerJobId`. Same build-time caveat as above |
+| `NEXT_PUBLIC_SITECORE_CAREERS_ROOT_SETTINGS_PATH` | Only if your content model differs | Path to the Site Settings item naming the Careers root. Default: `/sitecore/content/HztlFoundation/HztlDigital/Settings/Site Settings` |
+| `NEXT_PUBLIC_SITECORE_CAREERS_ROOT_FIELD` | Only if your content model differs | Field on that Site Settings item holding the Careers root reference. Default: `careersRootPage` |
 
 Local dev: put these in `.env.local` (already gitignored - never commit it).
 
-### Downstream contract
+### Downstream contracts
 
 Any project's endpoint named by `WORKABLE_SYNC_ENDPOINT_URL` must accept:
 
@@ -73,9 +85,21 @@ POST <WORKABLE_SYNC_ENDPOINT_URL>?shortcode=<id>
 Header: x-workable-sync-secret: <WORKABLE_FORCE_UPDATE_SECRET>
 ```
 
-...and respond with JSON `{ ok: boolean, operation?: string, error?: string }`. That's the
-entire integration surface between this app and whatever project it's syncing into - see
+...and respond with JSON `{ ok: boolean, operation?: string, error?: string }`. See
 `hztl-digital-2026`'s `src/app/api/workable/sync/route.ts` for a reference implementation.
+
+Any project's endpoint named by `WORKABLE_BULK_IMPORT_ENDPOINT_URL` must accept:
+
+```
+GET <WORKABLE_BULK_IMPORT_ENDPOINT_URL>
+Header: Authorization: Bearer <CRON_SECRET>
+```
+
+...and respond with JSON
+`{ ok: boolean, publishedJobCount?, created?, updated?, skipped?, failed?, staleRecycled?,
+staleRecycleFailed?, reconciliationSkipped?, error? }`. See `hztl-digital-2026`'s
+`src/app/api/workable/import/route.ts` for a reference implementation - it's the same route
+that project's own Vercel Cron already calls on a schedule.
 
 ## 📤 Deployment
 
@@ -93,6 +117,28 @@ entire integration surface between this app and whatever project it's syncing in
 4. Activate the app for the target environment, then verify on a real matching content item in
    Sitecore Pages.
 
+### Client Credentials - not needed
+
+App Studio offers a **Client Credentials** section (dedicated OAuth credentials for an app to
+call Sitecore APIs server-side, with no live user session - for background jobs, webhooks, or
+scheduled tasks). Leave it unset for this app, in every environment (dev/qa/prod alike) -
+neither of this app's two code paths needs it:
+
+- The **Page Context Panel** itself runs client-side and calls `xmc.authoring.graphql` through
+  the Marketplace SDK, riding on the **editor's own live Sitecore Pages session**
+  (`sitecoreContextId`/`application.context`) - not a separate app identity.
+- **`/api/force-sync` and `/api/bulk-import`** never call Sitecore APIs directly at all - they
+  proxy to the downstream project's own endpoints using the shared secrets in
+  **Configuration** above. The actual Sitecore-side write authentication already lives on that
+  project's side (e.g. `hztl-digital-2026`'s Workable import has its own dedicated Sitecore
+  OAuth client - see that repo's `imports/workable-sitecore-full-import/README.md`
+  Prerequisites), not in this app.
+
+Client Credentials would only become relevant if this app's architecture changed - e.g. if
+`/api/bulk-import` called Sitecore's Authoring GraphQL directly instead of proxying to the
+downstream project. That's not the current design, and doing so would duplicate auth logic
+that already exists correctly on the other side.
+
 ## ♻️ Reusing this app for another project
 
 This app is a per-project deployment, not a single multi-tenant instance - each project that
@@ -100,11 +146,12 @@ wants the Force Sync panel deploys and registers its own copy, configured for it
 model and its own sync endpoint. To reuse it:
 
 1. Fork or copy this repo.
-2. Implement an endpoint in your project matching the **downstream contract** above (or point
-   `WORKABLE_SYNC_ENDPOINT_URL` at an existing one if your project already has one).
-3. If your content model's type/field names differ from `CareerDetailPage`/`careerJobId`, set
-   `NEXT_PUBLIC_SITECORE_ITEM_GRAPHQL_TYPE`/`NEXT_PUBLIC_SITECORE_ITEM_ID_FIELD` - otherwise
-   leave them unset and the defaults apply.
+2. Implement endpoints in your project matching the **downstream contracts** above (or point
+   `WORKABLE_SYNC_ENDPOINT_URL`/`WORKABLE_BULK_IMPORT_ENDPOINT_URL` at existing ones if your
+   project already has them).
+3. If your content model's type/field names differ from `CareerDetailPage`/`careerJobId`/
+   `careersRootPage`, set the relevant `NEXT_PUBLIC_*` variables - otherwise leave them unset
+   and the defaults apply.
 4. Deploy and register a **separate** app entry in your own org's Cloud Portal (Deployment URLs
    and Route URLs are per-app-registration, not shared across projects) - follow **Deployment**
    above with your own values.
