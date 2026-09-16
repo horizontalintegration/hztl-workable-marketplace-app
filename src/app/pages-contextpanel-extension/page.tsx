@@ -1,8 +1,22 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import type { ComponentProps } from 'react';
 import type { PagesContext } from '@sitecore-marketplace-sdk/client';
 import { useMarketplaceClient } from '@/src/utils/hooks/useMarketplaceClient';
+import { Alert, AlertDescription } from '@/src/components/ui/alert';
+import { Badge } from '@/src/components/ui/badge';
+import { Button } from '@/src/components/ui/button';
+import { Card, CardContent, CardHeader } from '@/src/components/ui/card';
+import { Skeleton } from '@/src/components/ui/skeleton';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/src/components/ui/table';
 
 /**
  * Per-deployment, not per-code-change: which Sitecore template (as its GraphQL type) and which
@@ -15,6 +29,9 @@ import { useMarketplaceClient } from '@/src/utils/hooks/useMarketplaceClient';
  */
 const ITEM_GRAPHQL_TYPE = process.env.NEXT_PUBLIC_SITECORE_ITEM_GRAPHQL_TYPE || 'CareerDetailPage';
 const ITEM_ID_FIELD = process.env.NEXT_PUBLIC_SITECORE_ITEM_ID_FIELD || 'careerJobId';
+
+/** Field on the same template holding the human-readable job title, shown alongside the job id. */
+const ITEM_TITLE_FIELD = process.env.NEXT_PUBLIC_SITECORE_ITEM_TITLE_FIELD || 'careerTitle';
 
 /**
  * Path to the Site Settings item, and the Droplink/Droptree field on it, that name the "Careers
@@ -42,6 +59,9 @@ const ITEM_QUERY = `
       itemId
       path
       ${ITEM_ID_FIELD}: field(name: "${ITEM_ID_FIELD}") {
+        value
+      }
+      ${ITEM_TITLE_FIELD}: field(name: "${ITEM_TITLE_FIELD}") {
         value
       }
     }
@@ -113,6 +133,11 @@ function extractSyncId(item: Record<string, unknown> | null): string | null {
   return field?.value ?? null;
 }
 
+function extractTitle(item: Record<string, unknown> | null): string | null {
+  const field = item?.[ITEM_TITLE_FIELD] as { value?: string } | undefined;
+  return field?.value ?? null;
+}
+
 function extractCareersRootId(item: Record<string, unknown> | null): string | null {
   const field = item?.[CAREERS_ROOT_FIELD] as { value?: string } | undefined;
   return field?.value || null;
@@ -132,7 +157,17 @@ type SyncState =
 interface SyncLookupResult {
   key: string;
   syncId: string | null;
+  title: string | null;
   error: string | null;
+}
+
+type JobResultStatus = 'created' | 'updated' | 'skipped' | 'failed' | 'deleted';
+
+interface JobResult {
+  jobId: string;
+  title: string;
+  sitecoreItemId?: string | null;
+  status: JobResultStatus;
 }
 
 interface BulkImportSummary {
@@ -141,7 +176,19 @@ interface BulkImportSummary {
   updated?: number;
   skipped?: number;
   failed?: number;
+  // Per-job detail - only present once the downstream import endpoint (hztl-digital-2026's
+  // /api/workable/import) is updated to emit it; the aggregate counts above are all it returns
+  // today, so this stays optional and the table below is skipped when it's absent.
+  results?: JobResult[];
 }
+
+const JOB_STATUS_BADGE: Record<JobResultStatus, ComponentProps<typeof Badge>['colorScheme']> = {
+  created: 'success',
+  updated: 'primary',
+  skipped: 'neutral',
+  failed: 'danger',
+  deleted: 'warning',
+};
 
 type BulkImportState =
   | { status: 'idle' }
@@ -213,18 +260,28 @@ function PagesContextPanel() {
         if (cancelled) return;
         const item = unwrapGraphQLItem(result);
         if (!item) {
-          setSyncLookup({ key, syncId: null, error: 'Could not read this item from Sitecore.' });
+          setSyncLookup({
+            key,
+            syncId: null,
+            title: null,
+            error: 'Could not read this item from Sitecore.',
+          });
           return;
         }
         // `null` here covers both "fragment didn't match" (wrong item type) and "field is
         // genuinely empty" - normalized so it's distinguishable from "still loading" (no
         // result yet for this key).
-        setSyncLookup({ key, syncId: extractSyncId(item), error: null });
+        setSyncLookup({ key, syncId: extractSyncId(item), title: extractTitle(item), error: null });
       })
       .catch((err) => {
         if (cancelled) return;
         console.error('Error fetching the force-sync id:', err);
-        setSyncLookup({ key, syncId: null, error: 'Could not read this item from Sitecore.' });
+        setSyncLookup({
+          key,
+          syncId: null,
+          title: null,
+          error: 'Could not read this item from Sitecore.',
+        });
       });
 
     return () => {
@@ -270,10 +327,21 @@ function PagesContextPanel() {
   const currentKey = itemId && language ? `${itemId}::${language}` : null;
   const isCurrent = syncLookup?.key === currentKey;
   const syncId = isCurrent ? syncLookup.syncId : undefined;
+  const jobTitle = isCurrent ? syncLookup.title : undefined;
   const itemLookupError = isCurrent ? syncLookup.error : null;
 
   const isCareersRoot =
     !!itemId && !!careersRootItemId && normalizeItemId(itemId) === normalizeItemId(careersRootItemId);
+
+  // A stale "Synced"/"No update needed"/error message from the previously open item must not
+  // keep showing after switching to a different Career Detail page. Compared during render
+  // (React's documented pattern for resetting state on a prop/key change) rather than in a
+  // useEffect, which would setState synchronously and trigger an extra cascading render.
+  const lastSyncKeyRef = useRef(currentKey);
+  if (lastSyncKeyRef.current !== currentKey) {
+    lastSyncKeyRef.current = currentKey;
+    setSyncState({ status: 'idle' });
+  }
 
   const handleForceSync = useCallback(async () => {
     if (!syncId) return;
@@ -318,6 +386,7 @@ function PagesContextPanel() {
           updated: body.updated,
           skipped: body.skipped,
           failed: body.failed,
+          results: Array.isArray(body.results) ? body.results : undefined,
         },
       });
       client?.mutate('pages.reloadCanvas').catch((err) => {
@@ -330,55 +399,108 @@ function PagesContextPanel() {
   }, [client]);
 
   return (
-    <div
-      style={{
-        padding: '1rem',
-        border: '1px solid #ccc',
-        borderRadius: '8px',
-        maxWidth: '600px',
-        margin: '2rem auto',
-      }}
-    >
-      <h3>Workable force sync</h3>
-
-      {!isInitialized || itemId === undefined || careersRootItemId === undefined ? (
-        <p>Loading page context...</p>
-      ) : isCareersRoot ? (
-        <>
-          <p>Bulk import every published Workable job into Sitecore.</p>
-          <button onClick={handleBulkImport} disabled={bulkImportState.status === 'syncing'}>
-            {bulkImportState.status === 'syncing' ? 'Importing...' : 'Bulk Import'}
-          </button>
-          {bulkImportState.status === 'success' && (
-            <p>
-              Done - {bulkImportState.summary.created ?? 0} created, {bulkImportState.summary.updated ?? 0}{' '}
-              updated, {bulkImportState.summary.skipped ?? 0} skipped
-              {bulkImportState.summary.failed ? `, ${bulkImportState.summary.failed} failed` : ''}.
+    <Card elevation="sm" padding="md" className="mx-auto my-8 w-full max-w-[600px]">
+      <CardHeader>
+        <h3 className="text-lg leading-none font-semibold">
+          {isCareersRoot ? 'Workable Bulk Sync' : 'Workable Force Sync'}
+        </h3>
+      </CardHeader>
+      <CardContent>
+        {!isInitialized || itemId === undefined || careersRootItemId === undefined ? (
+          <div role="status" aria-label="Loading page context">
+            <Skeleton className="h-4 w-3/4" />
+          </div>
+        ) : isCareersRoot ? (
+          <div className="flex flex-col gap-3">
+            <p className="text-sm text-body-text">
+              Bulk import every published Workable job into Sitecore.
             </p>
-          )}
-          {bulkImportState.status === 'error' && (
-            <p role="alert">Bulk import failed: {bulkImportState.message}</p>
-          )}
-        </>
-      ) : syncId === undefined ? (
-        <p>Loading page context...</p>
-      ) : syncId === null ? (
-        <p>{itemLookupError ?? `This item is not a ${ITEM_GRAPHQL_TYPE}.`}</p>
-      ) : (
-        <>
-          <p>
-            Workable job: <strong>{syncId}</strong>
+            <Button onClick={handleBulkImport} disabled={bulkImportState.status === 'syncing'} className="self-start">
+              {bulkImportState.status === 'syncing' ? 'Importing...' : 'Bulk Import'}
+            </Button>
+            {bulkImportState.status === 'success' && (
+              <>
+                <Alert variant="success">
+                  <AlertDescription>
+                    Done - {bulkImportState.summary.created ?? 0} created, {bulkImportState.summary.updated ?? 0}{' '}
+                    updated, {bulkImportState.summary.skipped ?? 0} skipped
+                    {bulkImportState.summary.failed ? `, ${bulkImportState.summary.failed} failed` : ''}.
+                  </AlertDescription>
+                </Alert>
+                {bulkImportState.summary.results && bulkImportState.summary.results.length > 0 && (
+                  <Table
+                    size="sm"
+                    maxWidth="100%"
+                    maxHeight="280px"
+                    containerClassName="border border-border"
+                  >
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Career title</TableHead>
+                        <TableHead>Job ID</TableHead>
+                        <TableHead>Sitecore item</TableHead>
+                        <TableHead>Status</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {bulkImportState.summary.results.map((job) => (
+                        <TableRow key={job.jobId}>
+                          <TableCell className="whitespace-normal">{job.title}</TableCell>
+                          <TableCell>{job.jobId}</TableCell>
+                          <TableCell>{job.sitecoreItemId ?? '—'}</TableCell>
+                          <TableCell>
+                            <Badge colorScheme={JOB_STATUS_BADGE[job.status]}>{job.status}</Badge>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </>
+            )}
+            {bulkImportState.status === 'error' && (
+              <Alert variant="danger">
+                <AlertDescription>Bulk import failed: {bulkImportState.message}</AlertDescription>
+              </Alert>
+            )}
+          </div>
+        ) : syncId === undefined ? (
+          <div role="status" aria-label="Loading page context">
+            <Skeleton className="h-4 w-3/4" />
+          </div>
+        ) : syncId === null ? (
+          <p className="text-sm text-subtle-text">
+            {itemLookupError ?? `This item is not a ${ITEM_GRAPHQL_TYPE}.`}
           </p>
-          <button onClick={handleForceSync} disabled={syncState.status === 'syncing'}>
-            {syncState.status === 'syncing' ? 'Syncing...' : 'Force Sync'}
-          </button>
-          {syncState.status === 'success' && (
-            <p>{syncState.operation === 'skipped' ? 'No update needed.' : `Synced (${syncState.operation}).`}</p>
-          )}
-          {syncState.status === 'error' && <p role="alert">Sync failed: {syncState.message}</p>}
-        </>
-      )}
-    </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-0.5">
+              <p className="text-sm text-body-text">
+                <span className="font-semibold">Career</span> - {jobTitle || 'Untitled job'}
+              </p>
+              <p className="text-sm text-body-text">
+                <span className="font-semibold">Job Id</span> - {syncId}
+              </p>
+            </div>
+            <Button onClick={handleForceSync} disabled={syncState.status === 'syncing'} className="self-start">
+              {syncState.status === 'syncing' ? 'Syncing...' : 'Force Sync'}
+            </Button>
+            {syncState.status === 'success' && (
+              <Alert variant="success">
+                <AlertDescription>
+                  {syncState.operation === 'skipped' ? 'No update needed.' : `Synced (${syncState.operation}).`}
+                </AlertDescription>
+              </Alert>
+            )}
+            {syncState.status === 'error' && (
+              <Alert variant="danger">
+                <AlertDescription>Sync failed: {syncState.message}</AlertDescription>
+              </Alert>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

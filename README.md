@@ -71,6 +71,7 @@ sees either secret.
 | `WORKABLE_BULK_IMPORT_ENDPOINT_URL` | Always | The downstream project's scheduled bulk-import endpoint - full URL, path included (e.g. `https://hztl-digital.vercel.app/api/workable/import`) |
 | `NEXT_PUBLIC_SITECORE_ITEM_GRAPHQL_TYPE` | Only if your content model differs | GraphQL type name of the template this app should recognize. Default: `CareerDetailPage`. Client-side (`NEXT_PUBLIC_`) - changing it means redeploying, not just restarting |
 | `NEXT_PUBLIC_SITECORE_ITEM_ID_FIELD` | Only if your content model differs | Field on that template holding the id to sync by. Default: `careerJobId`. Same build-time caveat as above |
+| `NEXT_PUBLIC_SITECORE_ITEM_TITLE_FIELD` | Only if your content model differs | Field on that template holding the human-readable job title, shown next to the job id. Default: `careerTitle`. Same build-time caveat as above |
 | `NEXT_PUBLIC_SITECORE_CAREERS_ROOT_SETTINGS_PATH` | Only if your content model differs | Path to the Site Settings item naming the Careers root. Default: `/sitecore/content/HztlFoundation/HztlDigital/Settings/Site Settings` |
 | `NEXT_PUBLIC_SITECORE_CAREERS_ROOT_FIELD` | Only if your content model differs | Field on that Site Settings item holding the Careers root reference. Default: `careersRootPage` |
 
